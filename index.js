@@ -124,7 +124,7 @@ for (const offerType of offerTypes) {
         continue
     }
 
-    for (const [offer, i] of offers.data.entries()) {
+    for (const [i, offer] of offers.data.entries()) {
         process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline}...`)
         if (!offer || !offer.ExtPromotionId || !offer.ExtBadgeTypeCode) console.log(`[Error] Invalid offer data detected`)
         await clipOffer(offer)
