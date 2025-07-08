@@ -46,8 +46,9 @@ if (!config.email || !config.password) {
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 const randomSleep = (min, max) => sleep(Math.floor(Math.random() * (max - min + 1)) + min)
 
-
-await randomSleep(config.minStartDelay, config.maxStartDelay)
+const chosenDelay = Math.round(Math.random() * (config.maxStartDelay - config.minStartDelay + 1) + config.minStartDelay)
+console.log(`[Info] Waiting ${chosenDelay}ms before starting...`)
+await sleep(chosenDelay)
 
 async function getLoginCookiesFromBrowser() {
     console.log('[Info] Starting up...')
@@ -105,8 +106,10 @@ async function clipOffer(offer) {
             offerId,
             offerType: offerType
         })
+        return true
     } catch (error) {
-        console.error(`[Error] Error accepting offer ${offerId}:`, error.response ? error.response.data : error.message)
+        console.warn(`\n[Warn] Error accepting ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode} offer: ${offer.Headline}:`, error.response ? error.response.data : error.message)
+        return false
     }
 }
 
@@ -125,10 +128,11 @@ for (const offerType of offerTypes) {
     }
 
     for (const [i, offer] of offers.data.entries()) {
-        process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline}...`)
-        if (!offer || !offer.ExtPromotionId || !offer.ExtBadgeTypeCode) console.log(`[Error] Invalid offer data detected`)
-        await clipOffer(offer)
-        console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline}    `)
+        process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}...`)
+        if (!offer || !offer.ExtPromotionId || !offer.ExtBadgeTypeCode) console.warn(`[Warn] Invalid offer data detected`)
+        const success = await clipOffer(offer)
+        if (success)
+            console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline.replace(/[\r\n]+/g, ' ')}    `)
         if (i < offers.data.length - 1)
             await randomSleep(config.minRequestDelay, config.maxRequestDelay)
     }
@@ -139,4 +143,4 @@ for (const offerType of offerTypes) {
 if (totalOffersClipped === 0)
     console.log('---\n[Info] No offers available to be clipped. Program exiting.')
 else
-    console.log(`---\n[Info] Success! ${totalOffersClipped} offer${totalOffersClipped == 1 ? '' : 's'} clipped in total. Program exiting.`)
+    console.log(`---\n[Info] Success! ${totalOffersClipped} offer${totalOffersClipped == 1 ? '' : 's'} clipped in total.`)
