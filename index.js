@@ -20,6 +20,7 @@ const cliArgs = yargs(process.argv.slice(2))
     .option('saveCookies', { type: 'boolean', describe: 'Save cookies to disk after login (default false)', alias: 'savecookies' })
     .option('loadCookies', { type: 'boolean', describe: 'Load cookies from disk instead of logging in (default false)', alias: 'loadcookies' })
     .option('cookiesFile', { type: 'string', describe: 'Path to cookies JSON file (default ./cookies.json)', alias: 'cookiesfile' })
+    .option('asyncClipping', { type: 'boolean', describe: 'Enable async clipping mode. Wont wait for the previous clip request to finish before starting the next one (default false)', alias: 'asyncclipping' })
     .help()
     .parseSync()
 
@@ -44,6 +45,7 @@ function getConfig() {
         saveCookies: cliArgs.saveCookies ?? getEnvBoolean("SAVE_COOKIES", false),
         loadCookies: cliArgs.loadCookies ?? getEnvBoolean("LOAD_COOKIES", false),
         cookiesFile: cliArgs.cookiesFile || getEnvString("COOKIES_FILE", './cookies.json'),
+        asyncClipping: cliArgs.asyncClipping ?? getEnvBoolean("ASYNC_CLIPPING", false)
     }
 }
 const config = getConfig();
@@ -207,8 +209,15 @@ for (const offerType of offerTypes) {
     }
 
     for (const [i, offer] of offers.data.entries()) {
-        process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}...`)
+        process.stdout.write(`${config.asyncClipping ? '\n' : ''}[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}...`)
         if (!offer || !offer.ExtPromotionId || !offer.ExtBadgeTypeCode) console.warn(`[Warn] Invalid offer data detected`)
+        if (config.asyncClipping) {
+            clipOffer(offer).then(success => {
+                if (success)
+                    console.log(`[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline.replace(/[\r\n]+/g, ' ')}    `)
+            })
+            continue
+        }
         const success = await clipOffer(offer)
         if (success)
             console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline.replace(/[\r\n]+/g, ' ')}    `)
