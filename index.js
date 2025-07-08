@@ -5,10 +5,10 @@ import { CookieJar } from 'tough-cookie'
 import { wrapper } from 'axios-cookiejar-support'
 import yargs from 'yargs'
 import 'dotenv/config'
+import fs from 'fs/promises'
 puppeteer.use(StealthPlugin())
 
 // ─── Configuration Parsing ─────────────────────────────────────────────────────
-
 const cliArgs = yargs(process.argv.slice(2))
     .option('email', { type: 'string', describe: 'Raleys account email address' })
     .option('password', { type: 'string', describe: 'Raleys account password' })
@@ -17,12 +17,21 @@ const cliArgs = yargs(process.argv.slice(2))
     .option('maxStartDelay', { type: 'number', describe: 'Maximum random delay before starting the script in milliseconds (default 0)', alias: 'maxstartdelay' })
     .option('minRequestDelay', { type: 'number', describe: 'Minimum random delay between clip requests in milliseconds (default 1000)', alias: 'minrequestdelay' })
     .option('maxRequestDelay', { type: 'number', describe: 'Maximum random delay between clip requests in milliseconds (default 5000)', alias: 'maxrequestdelay' })
+    .option('saveCookies', { type: 'boolean', describe: 'Save cookies to disk after login (default false)', alias: 'savecookies' })
+    .option('loadCookies', { type: 'boolean', describe: 'Load cookies from disk instead of logging in (default false)', alias: 'loadcookies' })
+    .option('cookiesFile', { type: 'string', describe: 'Path to cookies JSON file (default ./cookies.json)', alias: 'cookiesfile' })
     .help()
     .parseSync()
 
 
 function getConfig() {
-    const getEnvNumber = (key, fallback) => process.env[key] !== undefined ? parseInt(process.env[key], 10) : fallback;
+    const getEnvNumber = (key, fallback) => process.env[key] !== undefined ? parseInt(process.env[key], 10) : fallback
+    const getEnvString = (key, fallback) => process.env[key] !== undefined ? process.env[key] : fallback
+    const getEnvBoolean = (key, fallback = false) => {
+        const val = process.env[key]
+        if (val === undefined) return fallback
+        return ['true', '1', 'yes'].includes(val.toLowerCase())
+    }
 
     return {
         email: cliArgs.email || process.env.RALEYS_EMAIL,
@@ -32,15 +41,17 @@ function getConfig() {
         maxStartDelay: cliArgs.maxStartDelay ?? getEnvNumber("MAX_START_DELAY", 0),
         minRequestDelay: cliArgs.minRequestDelay ?? getEnvNumber("MIN_REQUEST_DELAY", 1000),
         maxRequestDelay: cliArgs.maxRequestDelay ?? getEnvNumber("MAX_REQUEST_DELAY", 5000),
+        saveCookies: cliArgs.saveCookies ?? getEnvBoolean("SAVE_COOKIES", false),
+        loadCookies: cliArgs.loadCookies ?? getEnvBoolean("LOAD_COOKIES", false),
+        cookiesFile: cliArgs.cookiesFile || getEnvString("COOKIES_FILE", './cookies.json'),
     }
 }
 const config = getConfig();
 
-if (!config.email || !config.password) {
-    console.error('[ERROR] Missing credentials: provide --email and --password or set in .env');
+if ((!config.email || !config.password) && !config.loadCookies) {
+    console.error('[ERROR] Missing credentials: provide --email and --password or set in .env, or use --loadCookies to load cookies from file.');
     process.exit(1);
 }
-    
 
 
 const sleep = ms => new Promise(res => setTimeout(res, ms))
@@ -54,18 +65,69 @@ async function getLoginCookiesFromBrowser() {
     console.log('[Info] Starting up...')
     const browser = await puppeteer.launch({ headless: config.headless })
     const page = await browser.newPage()
-    await page.goto('https://www.raleys.com/', { waitUntil: 'networkidle2' })
-    await page.click('#header > nav > div > div.flex.h-14.items-center.justify-between.gap-2.px-4.py-2.tablet\\:gap-5.tablet\\:px-8 > div.tablet\\:block.desktop\\:order-3.desktop\\:block > div > div.hidden.w-fit.tablet\\:block > div > p > a:nth-child(1)')
+    console.log('[Info] Navigating to raleys.com...')
+    await page.goto('https://www.raleys.com/', { waitUntil: 'domcontentloaded' })
+    console.log('[Info] Navigated to raleys.com')
+
+    const loginButtonSelector = '#header > nav > div > div.flex.h-14.items-center.justify-between.gap-2.px-4.py-2.tablet\\:gap-5.tablet\\:px-8 > div.tablet\\:block.desktop\\:order-3.desktop\\:block > div > div.hidden.w-fit.tablet\\:block > div > p > a:nth-child(1)'
+    await page.waitForSelector(loginButtonSelector, { visible: true })
+    await page.click(loginButtonSelector)
     await page.waitForSelector('#email', { visible: true })
 
-    await page.type('#email', config.email)
-    await page.type('#password', config.password)
+    await sleep(1000) // Give a chance for anything else to load, else the login form will glitch and not submit on the first try
+
+    async function typeLikeHuman(page, selector, text) {
+        for (const char of text) {
+            await page.type(selector, char)
+            await new Promise(r => setTimeout(r, Math.random() * 150 + 50)) // 50-200ms random delay
+        }
+    }
+
+    await typeLikeHuman(page, '#email', config.email)
+    await typeLikeHuman(page, '#password', config.password)
 
     console.log('[Info] Logging in...')
-    await Promise.all([
-        page.click('#auth-modal > div > div.space-y-4.px-6.pb-4.sm\\:pb-6.lg\\:px-8.xl\\:pb-8.overflow-y-auto.tablet\\:max-h-160 > div > form > div.flex.justify-center > button'),
-        page.waitForNavigation({ waitUntil: 'networkidle2' }),
-    ])
+
+    // We need to retry logging in because the login button sometimes does not trigger navigation on the first click due to buggy website
+    const maxLoginSubmitFormButtonRetries = 3
+    for (let attempt = 1; attempt <= maxLoginSubmitFormButtonRetries; attempt++) {
+        
+        const [navigationResult] = await Promise.all([
+            page.waitForNavigation({
+                waitUntil: 'domcontentloaded',
+                timeout: 5000
+            }).catch(() => null),
+            page.click('#auth-modal > div > div.space-y-4.px-6.pb-4.sm\\:pb-6.lg\\:px-8.xl\\:pb-8.overflow-y-auto.tablet\\:max-h-160 > div > form > div.flex.justify-center > button')
+        ])
+
+        if (navigationResult)
+            break
+
+        const captchaIframeElement = await page.$('iframe[title="reCAPTCHA"]');
+        if (captchaIframeElement) {
+            if (!config.headless) {
+                console.warn(`[Warn] ⚠ Captcha detected during login attempt. Please solve it manually in the browser, and then click login. (you might have to click the login button if you don't see the captcha)`)
+
+                await page.waitForNavigation({
+                    waitUntil: 'domcontentloaded',
+                    timeout: 90_000
+                }).catch(() => { throw new Error('CAPTCHA was not solved in time (90s timeout).') })
+                console.log('[Info] Captcha successfully solved manually')
+                break // Break out of the login attempt loop
+            } else {
+                console.error(`[Error] Captcha detected during login attempt. Try running in non-headless mode to solve it manually using --headless false`)
+                throw new Error('Captcha detected during login attempt.')
+            }
+        }
+
+        if (attempt === maxLoginSubmitFormButtonRetries) {
+            console.warn(`[Warn] Attempt ${attempt} to click login button failed. Navigation did not happen.`)
+            console.error('[Error] Failed to trigger navigation after maximum attempts.')
+            throw new Error(`Failed to trigger navigation after ${maxLoginSubmitFormButtonRetries} attempts`)
+        }
+
+        console.warn(`[Warn] Attempt ${attempt} to click login button failed. Navigation did not happen. Retrying...`)
+    }
 
     const cookies = await page.cookies()
 
@@ -85,8 +147,25 @@ function setCookiesToJar(jar, cookies, url) {
     })
 }
 
+let cookies;
 
-const cookies = await getLoginCookiesFromBrowser()
+if (config.loadCookies) {
+    try {
+        const cookieFile = await fs.readFile(config.cookiesFile, 'utf-8')
+        cookies = JSON.parse(cookieFile)
+        console.log(`[Info] Loaded cookies from ${config.cookiesFile}`)
+    } catch (err) {
+        console.error(`[Error] Failed to load cookies from ${config.cookiesFile}:`, err.message)
+        process.exit(1)
+    }
+} else {
+    cookies = await getLoginCookiesFromBrowser()
+    if (config.saveCookies) {
+        await fs.writeFile(config.cookiesFile, JSON.stringify(cookies, null, 2))
+        console.log(`[Info] Saved cookies to ${config.cookiesFile}`)
+    }
+}
+
 const jar = new CookieJar()
 setCookiesToJar(jar, cookies, 'https://www.raleys.com')
 
