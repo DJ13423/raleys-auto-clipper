@@ -215,6 +215,8 @@ for (const offerType of offerTypes) {
             clipOffer(offer).then(success => {
                 if (success)
                     console.log(`[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline.replace(/[\r\n]+/g, ' ')}    `)
+            }).catch(err => {
+                console.warn(`[Warn] Error clipping offer: ${err.message}`)
             })
             continue
         }
