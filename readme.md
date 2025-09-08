@@ -1,6 +1,6 @@
-# raleys-auto-clipper
+# Raleys Auto Clipper
 
-Automates the process of logging into a Raley's (or Bel Air) online grocery account and clipping digital offers using a headless browser and authenticated API requests.
+Automates the process of logging into a Raley's online grocery account and clipping digital offers using a headless browser and authenticated API requests.
 
 ## 🧩 Features
 
@@ -14,7 +14,7 @@ Automates the process of logging into a Raley's (or Bel Air) online grocery acco
 ## ⚙️ Requirements
 
 - Node.js **v18+**
-- A Raley's / Bel Air online account with digital offers
+- A Raley's online account with digital offers
 - Headless-capable Linux/Windows/macOS (Puppeteer dependencies must be available)
 
 
