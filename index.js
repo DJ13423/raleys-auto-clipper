@@ -108,7 +108,7 @@ async function getLoginCookiesFromBrowser() {
         const captchaIframeElement = await page.$('iframe[title="reCAPTCHA"]');
         if (captchaIframeElement) {
             if (!config.headless) {
-                console.warn(`[Warn] ⚠ Captcha detected during login attempt. Please solve it manually in the browser, and then click login. (you might have to click the login button if you don't see the captcha)`)
+                console.warn(`[Warn] ⚠ Captcha detected during login attempt. Please solve it manually in the browser, and then click login. (you might have to click the login button first if you don't already see the captcha)`)
 
                 await page.waitForNavigation({
                     waitUntil: 'domcontentloaded',
@@ -117,8 +117,9 @@ async function getLoginCookiesFromBrowser() {
                 console.log('[Info] Captcha successfully solved manually')
                 break // Break out of the login attempt loop
             } else {
-                console.error(`[Error] Captcha detected during login attempt. Try running in non-headless mode to solve it manually using --headless false`)
-                throw new Error('Captcha detected during login attempt.')
+                console.error(`[Error] Captcha detected during login attempt. Try running in non-headless mode using --headless false and solve it manually`)
+                await browser.close()
+                process.exit(1)
             }
         }
 
@@ -179,19 +180,13 @@ const raleysClient = wrapper(axios.create({
 
 
 async function clipOffer(offer) {
-    try {
-        const offerId = offer.ExtPromotionId
-        const offerType = offer.ExtBadgeTypeCode
-        const isCoupon = offer.ExtBadgeTypeCode == 'mfg'
-        await raleysClient.post('/api/offers/accept' + (isCoupon ? '-coupons' : ''), {
-            offerId,
-            offerType: offerType
-        })
-        return true
-    } catch (error) {
-        console.warn(`\n[Warn] Error accepting ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode} offer: ${offer.Headline}:`, error.response ? error.response.data : error.message)
-        return false
-    }
+    const offerId = offer.ExtPromotionId
+    const offerType = offer.ExtBadgeTypeCode
+    const isCoupon = offer.ExtBadgeTypeCode == 'mfg'
+    await raleysClient.post('/api/offers/accept' + (isCoupon ? '-coupons' : ''), {
+        offerId,
+        offerType: offerType
+    })
 }
 
 const offerTypes = ['SomethingExtra', 'WeeklyExclusive', 'DigitalCoupons']
@@ -199,35 +194,54 @@ const offerTypes = ['SomethingExtra', 'WeeklyExclusive', 'DigitalCoupons']
 console.log(`[Info] Checking for ${offerTypes.join(', ')} offers...`)
 
 let totalOffersClipped = 0
+const clipTasks = []
 
 for (const offerType of offerTypes) {
-    const offersResponse = await raleysClient.get(`/api/offers/targeted?offset=0&rows=999&type=available&filter=${offerType}`)
-    const offers = offersResponse.data
+    const { data: offers } = await raleysClient.get(`/api/offers/targeted?offset=0&rows=999&type=available&filter=${offerType}`)
+
     console.log(`---\n[Info] ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'} found`)
-    if (offers.total === 0) {
-        continue
-    }
+    if (offers.total === 0) continue
 
     for (const [i, offer] of offers.data.entries()) {
-        process.stdout.write(`${config.asyncClipping ? '\n' : ''}[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}...`)
-        if (!offer || !offer.ExtPromotionId || !offer.ExtBadgeTypeCode) console.warn(`[Warn] Invalid offer data detected`)
-        if (config.asyncClipping) {
-            clipOffer(offer).then(success => {
-                if (success)
-                    console.log(`[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline.replace(/[\r\n]+/g, ' ')}    `)
-            }).catch(err => {
-                console.warn(`[Warn] Error clipping offer: ${err.message}`)
-            })
+        process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}...${config.asyncClipping ? '\n' : ''}`)
+        if (!offer?.ExtPromotionId || !offer?.ExtBadgeTypeCode) {
+            console.warn(`[Warn] Invalid offer data detected`)
             continue
         }
-        const success = await clipOffer(offer)
-        if (success)
-            console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline.replace(/[\r\n]+/g, ' ')}    `)
-        if (i < offers.data.length - 1)
-            await randomSleep(config.minRequestDelay, config.maxRequestDelay)
+        if (config.asyncClipping) { // Start clipping without waiting for previous to finish
+            clipTasks.push(
+                clipOffer(offer)
+                    .then(success => ({ offer }))
+                    .catch(err => ({ offer, err }))
+            )
+        } else { // Clip one by one, waiting for each to finish
+            await clipOffer(offer).then(() => {
+                console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}    `)
+                }).catch(error => {
+                    console.warn(`\n[Warn] Error accepting ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode} offer: ${offer.Headline}: ${error.response?.data ?? error.message}`)
+                })
+
+            if (i < offers.data.length - 1)
+                await randomSleep(config.minRequestDelay, config.maxRequestDelay)
+        }
     }
-    console.log(`[Info] Successfully clipped ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'}`)
+    if (config.asyncClipping)
+        console.log(`[Info] Successfully started clipping ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'}`)
+    else
+        console.log(`[Info] Successfully clipped ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'}`)
     totalOffersClipped += offers.total
+}
+
+if (config.asyncClipping && totalOffersClipped > 0) {
+    console.log('---\n[Info] Async clipping results:')
+    const results = await Promise.allSettled(clipTasks)
+    for (const { status, value: { offer, err } = {} } of results) {
+        if (status === 'fulfilled') {
+            console.log(`[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}    `)
+        } else {
+            console.warn(`[Warn] Error clipping ${offer?.Headline}: ${err?.message ?? "Unknown error"}`)
+        }
+    }
 }
 
 if (totalOffersClipped === 0)
