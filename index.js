@@ -180,71 +180,96 @@ const raleysClient = wrapper(axios.create({
 
 
 async function clipOffer(offer) {
-    const offerId = offer.ExtPromotionId
-    const offerType = offer.ExtBadgeTypeCode
-    const isCoupon = offer.ExtBadgeTypeCode == 'mfg'
-    await raleysClient.post('/api/offers/accept' + (isCoupon ? '-coupons' : ''), {
-        offerId,
-        offerType: offerType
-    })
-}
-
-const offerTypes = ['SomethingExtra', 'WeeklyExclusive', 'DigitalCoupons']
-
-console.log(`[Info] Checking for ${offerTypes.join(', ')} offers...`)
-
-let totalOffersClipped = 0
-const clipTasks = []
-
-for (const offerType of offerTypes) {
-    const { data: offers } = await raleysClient.get(`/api/offers/targeted?offset=0&rows=999&type=available&filter=${offerType}`)
-
-    console.log(`---\n[Info] ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'} found`)
-    if (offers.total === 0) continue
-
-    for (const [i, offer] of offers.data.entries()) {
-        process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}...${config.asyncClipping ? '\n' : ''}`)
-        if (!offer?.ExtPromotionId || !offer?.ExtBadgeTypeCode) {
-            console.warn(`[Warn] Invalid offer data detected`)
-            continue
-        }
-        if (config.asyncClipping) { // Start clipping without waiting for previous to finish
-            clipTasks.push(
-                clipOffer(offer)
-                    .then(success => ({ offer }))
-                    .catch(err => ({ offer, err }))
-            )
-        } else { // Clip one by one, waiting for each to finish
-            await clipOffer(offer).then(() => {
-                console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}    `)
-                }).catch(error => {
-                    console.warn(`\n[Warn] Error accepting ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode} offer: ${offer.Headline}: ${error.response?.data ?? error.message}`)
-                })
-
-            if (i < offers.data.length - 1)
-                await randomSleep(config.minRequestDelay, config.maxRequestDelay)
-        }
+    try {
+        const offerId = offer.ExtPromotionId
+        const offerType = offer.ExtBadgeTypeCode
+        const isCoupon = offerType === 'mfg'
+        await raleysClient.post('/api/offers/accept' + (isCoupon ? '-coupons' : ''), {
+            offerId, offerType
+        })
+        return offer
+    } catch (err) {
+        err.offer = offer
+        throw err
     }
-    if (config.asyncClipping)
-        console.log(`[Info] Successfully started clipping ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'}`)
-    else
-        console.log(`[Info] Successfully clipped ${offers.total} ${offerType} offer${offers.total == 1 ? '' : 's'}`)
-    totalOffersClipped += offers.total
 }
 
-if (config.asyncClipping && totalOffersClipped > 0) {
+const clipTasks = []
+let successfulClips = 0
+
+/**
+ * @type {{
+ *   PromotionDefinitionId: number,
+ *   ExtPromotionId: string,
+ *   ExtPromotionTypeCode: string,
+ *   ExtPromotionType: any,
+ *   RewardType: string,
+ *   PromotionDefinitionName: string,
+ *   PromotionCode: string,
+ *   Description: string,
+ *   Headline: string,
+ *   SubHeadline: string,
+ *   QualifiedImageUrl: string,
+ *   ExtBadgeTypeCode: string,
+ *   ExtFlagTypeCode: string,
+ *   AutoApply: boolean,
+ *   Priority: number,
+ *   SortOrder: number,
+ *   EndDate: string,
+ *   PDPDisplay: any,
+ *   IsAccepted: boolean,
+ *   MaxApply: number,
+ *   OfferType: number,
+ *   PromotionCategoryName: string,
+ *   ProductList: any[]
+ * }[]}
+ */
+const offersUnfiltered = (await raleysClient.get(`/api/offers/get-offers?offset=0&rows=999&clipped=Unclipped`)).data.data
+
+// Remove offers that have IsAccepted = true, since the API still returns them sometimes
+const offers = offersUnfiltered.filter(offer => !offer.IsAccepted)
+
+console.log(`---\n[Info] ${offers.length} offer${offers.length == 1 ? '' : 's'} found`)
+
+for (const [i, offer] of offers.entries()) {
+    process.stdout.write(`[Info] Clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}` + (config.asyncClipping ? '\n' : ''))
+    if (!offer?.ExtPromotionId || !offer?.ExtBadgeTypeCode) {
+        console.warn(`[Warn] Invalid offer data detected`)
+        continue
+    }
+    if (config.asyncClipping) { // Start clipping without waiting for previous to finish
+        clipTasks.push(
+            clipOffer(offer).then(() => ({ offer }))
+        )
+    } else { // Clip one by one, waiting for each to finish
+        await clipOffer(offer).then(() => {
+            console.log(`\r[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}    `)
+            successfulClips++
+        }).catch(error => {
+            console.warn(`\n[Warn] Error clipping offer "${offer?.Headline}": ${error.response?.data?.message ?? "Unknown error"}`)
+        })
+
+        if (i < offers.length - 1)
+            await randomSleep(config.minRequestDelay, config.maxRequestDelay)
+    }
+}
+
+if (config.asyncClipping && offers.length > 0) {
     console.log('---\n[Info] Async clipping results:')
     const results = await Promise.allSettled(clipTasks)
-    for (const { status, value: { offer, err } = {} } of results) {
-        if (status === 'fulfilled') {
+    for (const result of results) {
+        if (result.status === 'fulfilled') {
+            const { offer } = result.value
             console.log(`[Info] Clipped ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode}: ${offer.Headline} ${offer.SubHeadline?.replace(/[\r\n]+/g, ' ')}    `)
+            successfulClips++
         } else {
-            console.warn(`[Warn] Error clipping ${offer?.Headline}: ${err?.message ?? "Unknown error"}`)
+            const { offer, response } = result.reason
+            console.warn(`[Warn] Error clipping ${offer.ExtBadgeTypeCode == "mfg" ? "Coupon" : offer.ExtBadgeTypeCode} "${offer?.Headline}": ${response?.data?.message ?? "Unknown error"}`)
         }
     }
 }
 
-if (totalOffersClipped === 0)
+if (offers.length === 0)
     console.log('---\n[Info] No offers available to be clipped. Program exiting.')
 else
-    console.log(`---\n[Info] Success! ${totalOffersClipped} offer${totalOffersClipped == 1 ? '' : 's'} clipped in total.`)
+    console.log(`---\n[Info] Done! ${successfulClips} offer${successfulClips == 1 ? '' : 's'} clipped. ${offers.length - successfulClips} offer${offers.length - successfulClips == 1 ? '' : 's'} failed.`)
